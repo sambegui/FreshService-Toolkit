@@ -21,14 +21,53 @@ A comprehensive toolkit for FreshService administrators to efficiently manage us
 
 ## Installation
 
-Clone this repository:
+### Windows
+1. Clone this repository:
+   ```
+   git clone https://github.com/sambegui/FreshService-Toolkit.git
+   cd FreshService-Toolkit
+   ```
+2. Run one of the setup scripts:
+   - Command Prompt: `setup_windows.bat`
+   - PowerShell: `.\setup_windows.ps1`
+3. After setup, run the toolkit:
+   - Command Prompt: `run_toolkit.bat`
+   - PowerShell: `.\run_toolkit.ps1`
 
-```
-git clone https://github.com/yourusername/freshservice-toolkit.git
-cd freshservice-toolkit
-```
+### macOS
+1. Clone this repository:
+   ```
+   git clone https://github.com/sambegui/FreshService-Toolkit.git
+   cd FreshService-Toolkit
+   ```
+2. Make the setup script executable and run it:
+   ```
+   chmod +x setup_mac.sh
+   ./setup_mac.sh
+   ```
+3. After setup, run the toolkit:
+   ```
+   ./run_toolkit.sh
+   ```
 
 The script requires Python 3.6 or higher and uses several dependencies that are automatically managed.
+
+## Troubleshooting
+
+### macOS Installation Issues
+If you encounter dependency issues on macOS after running the setup script, you may need to manually install some packages:
+
+```bash
+# Activate the virtual environment
+source venv/bin/activate
+
+# Manually install dependencies
+pip install requests
+pip install python-Levenshtein-wheels
+
+# Now try running the toolkit again
+./run_toolkit.sh
+```
 
 ## Requirements
 

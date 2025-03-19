@@ -1,0 +1,6 @@
+Email,Group_Name,Action
+john.doe@example.com,Support Team,add
+jane.smith@example.com,Admin Group,add
+mike.johnson@example.com,Finance Team,add
+sarah.williams@example.com,HR Team,add
+david.brown@example.com,Old Group,remove 

@@ -63,7 +63,7 @@ source venv/bin/activate
 
 # Manually install dependencies
 pip install requests
-pip install python-Levenshtein-wheels
+pip install Levenshtein
 
 # Now try running the toolkit again
 ./run_toolkit.sh

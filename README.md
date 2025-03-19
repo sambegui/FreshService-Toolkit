@@ -92,7 +92,7 @@ python freshservice_toolkit.py
 - **📊 Bulk Operations**: Perform actions on multiple users via CSV
 - **👥 Group Management**: Manage user group memberships
 - **🔐 Access Control**: Handle password resets and account unlocking
-- **📈 Reports**: Generate reports on user activity and export data
+- **📈 Reports**: Generate reports on user activity and export data (WIP)
 - **🔄 Switch Workspace**: Change to a different FreshService workspace
 - **❓ Help**: Display help information
 - **🚪 Exit**: Exit the toolkit (use 'q' at any time to quit)

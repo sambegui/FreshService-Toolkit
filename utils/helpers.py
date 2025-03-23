@@ -15,6 +15,20 @@ import platform
 import shutil
 from typing import Optional
 
+# Try to import colorama, but don't fail if it's not available
+try:
+    import colorama
+    COLORAMA_AVAILABLE = True
+except ImportError:
+    COLORAMA_AVAILABLE = False
+
+# Check for tabulate
+try:
+    import tabulate as tabulate_module
+    TABULATE_AVAILABLE = True
+except ImportError:
+    TABULATE_AVAILABLE = False
+
 
 def setup_logging(log_level: int = logging.INFO) -> logging.Logger:
     """
@@ -26,6 +40,9 @@ def setup_logging(log_level: int = logging.INFO) -> logging.Logger:
     Returns:
         Configured logger instance
     """
+    # First, configure the root logger to ERROR to prevent any INFO messages in console
+    logging.basicConfig(level=logging.ERROR)
+    
     # Create logs directory if it doesn't exist
     log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
     os.makedirs(log_dir, exist_ok=True)
@@ -43,9 +60,9 @@ def setup_logging(log_level: int = logging.INFO) -> logging.Logger:
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(log_level)
     
-    # Create console handler - only warnings and errors to console by default
+    # Create console handler - ONLY errors to console
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.ERROR)  # Only errors to console (was WARNING)
+    console_handler.setLevel(logging.ERROR)  # Only errors to console
     
     # Create formatter
     file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -58,6 +75,16 @@ def setup_logging(log_level: int = logging.INFO) -> logging.Logger:
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     
+    # Prevent propagation to parent loggers (important to avoid duplicate logs)
+    logger.propagate = False
+    
+    # Disable all non-error logs for related modules
+    for module in ["requests", "urllib3", "freshservice_toolkit", 
+                  "utils.api_client", "utils.user_manager", "utils.department_manager",
+                  "utils.workspace_manager", "utils.csv_processor", "utils.reports"]:
+        logging.getLogger(module).setLevel(logging.ERROR)
+    
+    # Only have detailed logs in the file, not console
     logger.info("Logging initialized")
     return logger
 
@@ -130,8 +157,12 @@ def print_colored(text: str, color: str, bold: bool = False) -> None:
         color: Color to use ('red', 'green', 'yellow', 'blue', 'cyan', 'magenta')
         bold: Whether to print in bold
     """
+    if not COLORAMA_AVAILABLE:
+        # Fallback if colorama is not installed
+        print(text)
+        return
+        
     try:
-        import colorama
         colorama.init()
         
         colors = {
@@ -150,8 +181,8 @@ def print_colored(text: str, color: str, bold: bool = False) -> None:
         
         print(f"{bold_code}{color_code}{text}{reset}")
         
-    except ImportError:
-        # Fallback if colorama is not installed
+    except Exception:
+        # Fallback for any other errors
         print(text)
 
 
@@ -290,4 +321,32 @@ def is_valid_file_path(path: str) -> bool:
                 
         return True
     except (OSError, IOError):
-        return False 
+        return False
+
+
+def use_tabulate(table_data, headers, tablefmt="grid"):
+    """
+    Use tabulate module if available, otherwise fall back to built-in formatter.
+    
+    Args:
+        table_data: List of data rows to format
+        headers: List of column headers
+        tablefmt: Format for tabulate (ignored if tabulate not available)
+        
+    Returns:
+        Formatted table string
+    """
+    if TABULATE_AVAILABLE:
+        return tabulate_module.tabulate(table_data, headers=headers, tablefmt=tablefmt)
+    else:
+        # Convert data to list of dicts if not already
+        if table_data and isinstance(table_data[0], list):
+            dict_data = []
+            for row in table_data:
+                row_dict = {}
+                for i, header in enumerate(headers):
+                    row_dict[header] = row[i] if i < len(row) else ""
+                dict_data.append(row_dict)
+            return format_table(dict_data, headers)
+        else:
+            return format_table(table_data, headers) 

@@ -10,18 +10,42 @@ Supports multiple workspaces and provides various user management capabilities.
 
 import os
 import sys
-import base64
+import time
+import csv
+import json
 import getpass
 import logging
+import datetime
 import argparse
+import base64
 from typing import Dict, List, Optional, Tuple, Any
 
-# Core modules
+# Core modules - make imports optional with fallbacks
+try:
+    from tabulate import tabulate
+    TABULATE_AVAILABLE = True
+except ImportError:
+    TABULATE_AVAILABLE = False
+
+try:
+    from colorama import init, Fore, Style
+    COLORAMA_AVAILABLE = True
+except ImportError:
+    COLORAMA_AVAILABLE = False
+
+# Try to import keyring, but don't fail if it's not available
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:
+    KEYRING_AVAILABLE = False
+
 from utils.api_client import FreshServiceAPI
 from utils.workspace_manager import WorkspaceManager
 from utils.user_manager import UserManager
 from utils.department_manager import DepartmentManager
 from utils.csv_processor import CSVProcessor
+from utils.reports import ReportsManager
 from utils.helpers import setup_logging, setup_virtual_env, print_colored, clear_screen
 from utils.menu import Menu
 
@@ -38,16 +62,100 @@ def setup_environment() -> None:
 
 
 def get_api_key() -> str:
-    """Prompt the user for their FreshService API key."""
-    print_colored("\n🔑 FreshService API Authentication", "blue")
-    print_colored("Please enter your FreshService API key (input will be hidden):", "yellow")
-    api_key = getpass.getpass()
+    """Get the API key from environment variable, keyring, or user input."""
+    global logger
     
-    if not api_key:
-        print_colored("❌ API key is required to continue.", "red")
-        sys.exit(1)
+    # Initialize on first run
+    if logger is None:
+        logger = logging.getLogger('freshservice_toolkit')
+    
+    while True:
+        api_key = os.environ.get('FRESHSERVICE_API_KEY')
         
-    return api_key
+        if not api_key and KEYRING_AVAILABLE:
+            try:
+                api_key = keyring.get_password("freshservice-toolkit", "api_key")
+            except Exception as e:
+                logging.warning(f"Failed to retrieve API key from keyring: {e}")
+        
+        if not api_key:
+            import getpass
+            print_colored("\n🔑 FreshService API Authentication", "blue")
+            api_key = getpass.getpass("Please enter your FreshService API key (input will be hidden):\nPassword: ")
+        
+        # Try to validate the API key
+        try:
+            valid = validate_api_key(api_key)
+            if valid:
+                # Save valid key to keyring for future use
+                if KEYRING_AVAILABLE:
+                    try:
+                        keyring.set_password("freshservice-toolkit", "api_key", api_key)
+                    except Exception as e:
+                        logging.warning(f"Failed to save API key to keyring: {e}")
+                return api_key
+            else:
+                # Key validation failed
+                print_colored("\n❌ Invalid API key. The key could not be validated with FreshService.", "red")
+                print_colored("Please check your API key and try again.", "yellow")
+                
+                # Clear environment variable and keyring storage
+                os.environ.pop('FRESHSERVICE_API_KEY', None)
+                if KEYRING_AVAILABLE:
+                    try:
+                        keyring.delete_password("freshservice-toolkit", "api_key")
+                    except Exception:
+                        pass
+                
+                # Ask what to do next
+                retry_choice = input("Would you like to [1] Enter a new API key or [2] Continue with invalid key anyway (not recommended)? (1/2): ").strip()
+                if retry_choice == "2":
+                    print_colored("\n⚠️ Warning: Using an invalid API key. Most functionality will fail.", "red", bold=True)
+                    input("Press Enter to continue anyway or Ctrl+C to exit...")
+                    return api_key
+                # If not 2, default to asking for a new key by continuing the loop
+        
+        except Exception as e:
+            # Handle validation errors
+            print_colored(f"\n❌ Error during API key validation: {str(e)}", "red")
+            print_colored("Please check your API key and try again.", "yellow")
+            
+            # Ask what to do next
+            retry_choice = input("Would you like to [1] Enter a new API key or [2] Continue with invalid key anyway (not recommended)? (1/2): ").strip()
+            if retry_choice == "2":
+                print_colored("\n⚠️ Warning: Using an invalid or untested API key. Most functionality will fail.", "red", bold=True)
+                input("Press Enter to continue anyway or Ctrl+C to exit...")
+                return api_key
+            # If not 2, default to asking for a new key by continuing the loop
+
+def validate_api_key(api_key: str) -> bool:
+    """Validate the API key by making a simple API request."""
+    print_colored("🔄 Validating API key...", "yellow")
+    
+    # Create a logging instance if the global one isn't available yet
+    global logger
+    if logger is None:
+        logger = logging.getLogger('freshservice_toolkit')
+    
+    # Create a temporary API client to test the key
+    from utils.api_client import FreshServiceAPI
+    api_client = FreshServiceAPI(api_key, logger, dry_run=False)
+    
+    try:
+        # Make a simple request that should work with any valid key
+        # Using the /api/v2/requesters endpoint with a limit of 1
+        response = api_client._make_request('GET', 'requesters', params={'per_page': 1})
+        
+        # If we get a valid response, the key is valid
+        is_valid = isinstance(response, dict) and 'requesters' in response
+        
+        if is_valid:
+            print_colored("✅ API key validated successfully!", "green")
+        
+        return is_valid
+    except Exception as e:
+        logging.error(f"API key validation failed: {str(e)}")
+        return False
 
 
 def display_main_menu(
@@ -159,9 +267,10 @@ def reports_menu(user_manager: UserManager, csv_processor: CSVProcessor) -> None
     """Display the reports menu."""
     menu = Menu("Reports")
     
-    menu.add_item("📆 User Activity Report", lambda: user_activity_report(user_manager, csv_processor))
+    menu.add_item("📆 User Ticket Activity Report", lambda: user_activity_report(user_manager, csv_processor))
     menu.add_item("💤 Inactive Accounts Report", lambda: inactive_accounts_report(user_manager, csv_processor))
     menu.add_item("📊 Custom User Report", lambda: custom_user_report(user_manager, csv_processor))
+    menu.add_item("🔍 API Diagnostics", lambda: run_api_diagnostics(user_manager))
     # Return True when back is selected to break out of the menu loop
     menu.add_item("↩️ Back", lambda: True)
     
@@ -489,6 +598,14 @@ def display_help() -> None:
     print("- Add or remove users from groups")
     print("\nUse the 'Create CSV Template' option to generate template files with the correct format.")
     
+    print_colored("\nReports:", "cyan")
+    print("Generate various reports including:")
+    print("- User Activity Report: Track user interactions with tickets")
+    print("  This report shows tickets created by a user and their conversations")
+    print("  You can filter by time period and export results to CSV")
+    print("- Inactive Accounts Report: Identify dormant user accounts")
+    print("- Custom User Report: Generate custom reports with selected fields")
+    
     print_colored("\nCSV File Formats:", "cyan")
     print("For bulk operations, CSV files should include the following columns:")
     
@@ -509,6 +626,7 @@ def display_help() -> None:
     print("- After creating a CSV template, edit it with your preferred spreadsheet software")
     print("- Check result files for details on any errors encountered during bulk operations")
     print("- Back up important data before performing bulk operations")
+    print("- Activity reports can help track user engagement and identify support patterns")
     
     input("\nPress Enter to continue...")
 
@@ -1531,13 +1649,604 @@ def update_user_role(user_manager):
 
 def user_activity_report(user_manager, csv_processor):
     """Generate a user activity report."""
-    print_colored("\n📆 This feature is not yet implemented.", "yellow")
-    input("Press Enter to continue...")
+    print_colored("\n📆 User Ticket Activity Report", "blue")
+    
+    # Initialize reports manager with the API client and workspace ID
+    reports_manager = ReportsManager(
+        user_manager.api_client, 
+        user_manager.workspace_id,
+        user_manager.logger
+    )
+    
+    # We need department_manager for select_user_from_results function
+    department_manager = DepartmentManager(
+        user_manager.api_client,
+        user_manager.workspace_id,
+        user_manager.logger
+    )
+    
+    # Search for a user
+    print_colored("Search for a user to generate activity report:", "green")
+    option = input("Search by [1] Email, [2] User ID, or [3] Name (or 'q' to quit): ").strip()
+    
+    if option.lower() == 'q':
+        return
+    
+    user_id = None
+    email = None
+    user = None
+    
+    if option == '1':
+        # Search by email
+        email = input("Enter user email: ").strip()
+        if not email:
+            print_colored("❌ Email is required.", "red")
+            input("Press Enter to continue...")
+            return
+            
+        # Verify the user exists
+        user = user_manager.get_user_by_email(email)
+        if not user:
+            print_colored(f"❌ No user found with email: {email}", "red")
+            input("Press Enter to continue...")
+            return
+            
+        user_id = user.get('id')
+        user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+        
+    elif option == '2':
+        # Search by user ID
+        try:
+            user_id = int(input("Enter user ID: ").strip())
+            
+            # Verify the user exists
+            user = user_manager.get_user_by_id(user_id)
+            if not user:
+                print_colored(f"❌ No user found with ID: {user_id}", "red")
+                input("Press Enter to continue...")
+                return
+                
+            email = user.get('primary_email')
+            user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+            
+        except ValueError:
+            print_colored("❌ User ID must be a number.", "red")
+            input("Press Enter to continue...")
+            return
+    elif option == '3':
+        # Search by name
+        first_name = input("Enter first name (leave blank to skip): ").strip()
+        last_name = input("Enter last name (leave blank to skip): ").strip()
+        
+        if not first_name and not last_name:
+            print_colored("❌ At least one name field is required.", "red")
+            input("Press Enter to continue...")
+            return
+            
+        print_colored(f"Searching for users with name: {first_name} {last_name}", "blue")
+        users = user_manager.search_users_by_name(first_name, last_name)
+        
+        if users:
+            if len(users) == 1:
+                user = users[0]
+                user_id = user.get('id')
+                email = user.get('primary_email')
+                user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+            else:
+                # Multiple users found, let the user select one
+                selected_user = select_user_from_results(users, user_manager, department_manager)
+                if selected_user:
+                    user = selected_user
+                    user_id = user.get('id')
+                    email = user.get('primary_email')
+                    user_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+                else:
+                    return  # User cancelled the selection
+        else:
+            print_colored(f"❌ No users found with name: {first_name} {last_name}", "red")
+            input("Press Enter to continue...")
+            return
+    else:
+        print_colored("❌ Invalid option.", "red")
+        input("Press Enter to continue...")
+        return
+    
+    # Get time period
+    print_colored("\nSelect time period:", "green")
+    print_colored("1. Last 7 days", "cyan")
+    print_colored("2. Last 30 days", "cyan")
+    print_colored("3. Last 90 days", "cyan")
+    print_colored("4. Custom", "cyan")
+    
+    period_option = input("Choose a time period (1-4): ").strip()
+    
+    days = 30  # Default to 30 days
+    if period_option == '1':
+        days = 7
+    elif period_option == '2':
+        days = 30
+    elif period_option == '3':
+        days = 90
+    elif period_option == '4':
+        try:
+            days = int(input("Enter number of days to look back: ").strip())
+            if days <= 0:
+                print_colored("❌ Days must be a positive number.", "red")
+                input("Press Enter to continue...")
+                return
+        except ValueError:
+            print_colored("❌ Days must be a number.", "red")
+            input("Press Enter to continue...")
+            return
+    else:
+        print_colored("❌ Invalid option. Using default of 30 days.", "yellow")
+    
+    # Generate report
+    print_colored(f"\nGenerating activity report for {user_name} ({email}) over the past {days} days...", "blue")
+    
+    try:
+        # Get comprehensive activity data including both requester and agent roles
+        activity_items, summary, is_agent = reports_manager.get_comprehensive_user_activity(
+            user_id=user_id,
+            days=days
+        )
+        
+        if not activity_items:
+            print_colored("No activity found for this user in the specified time period.", "yellow")
+            input("Press Enter to continue...")
+            return
+        
+        # Display summary
+        print_colored("\nActivity Summary:", "green")
+        print_colored(f"Date Range: {summary.get('date_range')}", "yellow")
+        print_colored(f"Total Tickets Created: {summary.get('total_tickets_created')}", "yellow")
+        print_colored(f"Total Conversations as Requester: {summary.get('total_conversations_as_requester')}", "yellow")
+        
+        # Show agent-specific information if applicable
+        if is_agent:
+            print_colored("\nAgent Activity:", "green")
+            
+            # Check if there was an error retrieving agent activity
+            if 'agent_error' in summary:
+                print_colored("⚠️ Note: Agent activity data could not be fully retrieved", "yellow")
+                error_type = summary.get('agent_error_type', 'Unknown error')
+                print_colored(f"Error type: {error_type}", "yellow")
+                
+                if "400 Bad Request" in summary.get('agent_error', ''):
+                    print_colored("The API returned a 400 Bad Request error, which typically indicates parameter issues", "yellow")
+                    print_colored("This is likely due to limitations in the Freshservice API for filtering tickets by agent", "yellow")
+                elif "404 Not Found" in summary.get('agent_error', ''):
+                    print_colored("The API returned a 404 Not Found error, which may indicate the endpoint doesn't exist", "yellow")
+                    print_colored("This could be due to differences in API versions or permissions", "yellow")
+                elif "403 Forbidden" in summary.get('agent_error', ''):
+                    print_colored("The API returned a 403 Forbidden error, indicating permission issues", "yellow")
+                    print_colored("Your API key may not have access to agent-specific operations", "yellow")
+                else:
+                    # Show a substring of the error to avoid overwhelming the user
+                    error_text = summary.get('agent_error', '')
+                    if len(error_text) > 100:
+                        error_text = error_text[:97] + "..."
+                    print_colored(f"Error details: {error_text}", "yellow")
+                
+                # Show fallback status
+                if summary.get('agent_activity_available') is False:
+                    print_colored("Showing only requester activity for this user", "yellow")
+                else:
+                    print_colored("Using alternative methods to retrieve agent activity", "yellow")
+                    print_colored(f"Total Tickets Worked On: {summary.get('total_tickets_worked')}", "yellow")
+                    print_colored(f"Tickets Assigned: {summary.get('tickets_assigned')}", "yellow")
+                    print_colored(f"Tickets Collaborated On: {summary.get('tickets_collaborated')}", "yellow") 
+                    print_colored(f"Total Responses as Agent: {summary.get('total_responses_as_agent')}", "yellow")
+                    
+                # Add information about the API diagnostics
+                print_colored("\nRun 'API Diagnostics' from the Reports menu for more information on API capabilities.", "cyan")
+            else:
+                print_colored(f"Total Tickets Worked On: {summary.get('total_tickets_worked')}", "yellow")
+                print_colored(f"Tickets Assigned: {summary.get('tickets_assigned')}", "yellow")
+                print_colored(f"Tickets Collaborated On: {summary.get('tickets_collaborated')}", "yellow") 
+                print_colored(f"Total Responses as Agent: {summary.get('total_responses_as_agent')}", "yellow")
+        
+        # Display recent activity (max 10 items)
+        print_colored("\nRecent Activity:", "green")
+        for i, item in enumerate(activity_items[:10], 1):
+            role = item.get('role', 'requester')
+            role_label = f"[{role.capitalize()}]" if is_agent else ""
+            
+            if item.get('type') == 'ticket':
+                # Map status and priority codes to human-readable text
+                status_val = item.get('status')
+                status_map = {
+                    1: "Open",
+                    2: "Pending",
+                    3: "Resolved",
+                    4: "Closed", 
+                    5: "New",
+                    6: "In Progress",
+                    7: "On Hold"
+                }
+                status_text = status_map.get(status_val, f"Status {status_val}")
+                
+                priority_val = item.get('priority')
+                priority_map = {
+                    1: "Low",
+                    2: "Medium",
+                    3: "High",
+                    4: "Urgent"
+                }
+                priority_text = priority_map.get(priority_val, f"Priority {priority_val}")
+                
+                # Add additional context if agent
+                agent_context = ""
+                if role == 'agent':
+                    agent_context = f" ({item.get('agent_role', '')})"
+                
+                print_colored(f"{i}. [Ticket] {role_label} {item.get('subject')} (ID: {item.get('ticket_id')}){agent_context}", "cyan")
+                print_colored(f"   Created: {reports_manager._format_date(item.get('created_at'))} | Status: {status_text} | Priority: {priority_text}", "yellow")
+            elif item.get('type') == 'conversation':
+                # Clean HTML content for display
+                body = reports_manager._clean_html(item.get('body', ''))
+                if len(body) > 50:
+                    body = body[:47] + '...'
+                
+                # Show conversation type for agent responses
+                conv_context = ""
+                if role == 'agent':
+                    conv_context = f" ({item.get('conversation_type', '')})"
+                    
+                print_colored(f"{i}. [Response] {role_label} Ticket #{item.get('ticket_id')}{conv_context}", "cyan")
+                print_colored(f"   Date: {reports_manager._format_date(item.get('created_at'))}", "yellow")
+                print_colored(f"   Content: {body}", "yellow")
+        
+        # Display activity visualization
+        print_colored("\nActivity Distribution:", "green")
+        visualization = reports_manager.get_activity_visualization(activity_items)
+        for line in visualization:
+            if "Monday" in line or "Tuesday" in line or "Wednesday" in line or "Thursday" in line or "Friday" in line or "Saturday" in line or "Sunday" in line:
+                parts = line.split(':', 1)
+                print_colored(parts[0] + ":", "cyan")
+                if len(parts) > 1:
+                    print(parts[1])
+            else:
+                print(line)
+        
+        # Option to export to CSV
+        export = input("\nExport full report to CSV? (y/n): ").lower() == 'y'
+        
+        if export:
+            # Generate a default filename with a cleaner format
+            today = datetime.datetime.now().strftime('%Y%m%d')
+            user_name_part = user_name.lower().replace(' ', '_')
+            default_filename = f"ticket_activity_{user_name_part}_{today}.csv"
+            
+            filename = input(f"Enter filename (default: {default_filename}): ").strip()
+            
+            if not filename:
+                filename = default_filename
+                
+            success = reports_manager.export_comprehensive_activity_to_csv(activity_items, summary, filename)
+            
+            if success:
+                print_colored(f"✅ Report exported to {filename}", "green")
+                
+                # Offer to open the file
+                open_file = input("Would you like to open the file now? (y/n): ").lower() == 'y'
+                if open_file:
+                    try:
+                        import os
+                        import platform
+                        import subprocess
+                        
+                        # Handle file opening based on platform
+                        if platform.system() == 'Windows':
+                            os.startfile(filename)
+                        elif platform.system() == 'Darwin':  # macOS
+                            subprocess.call(['open', filename])
+                        else:  # Linux
+                            subprocess.call(['xdg-open', filename])
+                            
+                        print_colored("Opening file...", "cyan")
+                    except Exception as e:
+                        print_colored(f"Could not open file: {e}", "yellow")
+                        print_colored(f"File is located at: {os.path.abspath(filename)}", "yellow")
+            else:
+                print_colored("❌ Failed to export report.", "red")
+        
+    except Exception as e:
+        print_colored(f"❌ Error generating activity report: {str(e)}", "red")
+        user_manager.logger.exception("Error generating activity report")
+    
+    input("\nPress Enter to continue...")
 
 
 def inactive_accounts_report(user_manager, csv_processor):
     """Generate a report of inactive accounts."""
-    print_colored("\n💤 This feature is not yet implemented.", "yellow")
+    print_colored("\n💤 Inactive Accounts Report", "blue")
+    print_colored("This report identifies users who haven't logged in for an extended period.", "yellow")
+    
+    # Initialize reports manager with the API client and workspace ID
+    reports_manager = ReportsManager(
+        user_manager.api_client, 
+        user_manager.workspace_id,
+        user_manager.logger
+    )
+    
+    # Initialize department manager for user selection
+    department_manager = DepartmentManager(
+        user_manager.api_client,
+        user_manager.workspace_id,
+        user_manager.logger
+    )
+    
+    # Get the inactivity threshold from the user
+    print_colored("\nSpecify inactivity threshold:", "green")
+    print_colored("1. 30 days", "cyan")
+    print_colored("2. 60 days", "cyan")
+    print_colored("3. 90 days (default)", "cyan")
+    print_colored("4. 180 days", "cyan")
+    print_colored("5. 365 days", "cyan")
+    print_colored("6. Custom", "cyan")
+    
+    threshold_option = input("Choose an option (1-6): ").strip()
+    
+    threshold_days = 90  # Default
+    if threshold_option == "1":
+        threshold_days = 30
+    elif threshold_option == "2":
+        threshold_days = 60
+    elif threshold_option == "3":
+        threshold_days = 90
+    elif threshold_option == "4":
+        threshold_days = 180
+    elif threshold_option == "5":
+        threshold_days = 365
+    elif threshold_option == "6":
+        try:
+            threshold_days = int(input("Enter custom threshold in days: ").strip())
+            if threshold_days <= 0:
+                print_colored("❌ Threshold must be a positive number. Using default of 90 days.", "red")
+                threshold_days = 90
+        except ValueError:
+            print_colored("❌ Invalid input. Using default of 90 days.", "red")
+            threshold_days = 90
+    
+    # Choose which types of users to include
+    print_colored("\nInclude in report:", "green")
+    print_colored("1. Agents and Requesters (default)", "cyan")
+    print_colored("2. Agents only", "cyan")
+    print_colored("3. Requesters only", "cyan")
+    
+    users_option = input("Choose an option (1-3): ").strip()
+    
+    include_agents = True
+    include_requesters = True
+    
+    if users_option == "2":
+        include_agents = True
+        include_requesters = False
+        print_colored("Generating report for agents only...", "blue")
+    elif users_option == "3":
+        include_agents = False
+        include_requesters = True
+        print_colored("Generating report for requesters only...", "blue")
+    else:
+        print_colored("Generating report for both agents and requesters...", "blue")
+    
+    # Add option for filtering by active status
+    print_colored("\nFilter by account status:", "green")
+    print_colored("1. All accounts (default)", "cyan")
+    print_colored("2. Active accounts only", "cyan")
+    print_colored("3. Inactive accounts only", "cyan")
+    
+    status_option = input("Choose an option (1-3): ").strip()
+    
+    status_filter = None
+    if status_option == "2":
+        status_filter = True
+        print_colored("Including only active accounts in report...", "blue")
+    elif status_option == "3":
+        status_filter = False
+        print_colored("Including only deactivated accounts in report...", "blue")
+    else:
+        print_colored("Including all accounts in report regardless of status...", "blue")
+    
+    # Prompt for selecting a test agent for API capability testing
+    print_colored("\nTo verify API capabilities, we need to select a user account.", "yellow")
+    print_colored("This helps test access to login data in your Freshservice instance.", "yellow")
+    
+    test_user_id = select_agent_for_testing(user_manager, department_manager)
+    
+    if test_user_id:
+        # If user was selected, get their details for display
+        try:
+            test_user = user_manager.get_user_by_id(test_user_id)
+            user_name = f"{test_user.get('first_name', '')} {test_user.get('last_name', '')}".strip()
+            print_colored(f"Using {user_name} (ID: {test_user_id}) for API capability testing", "green")
+        except Exception:
+            print_colored(f"Using ID {test_user_id} for API capability testing", "green")
+    else:
+        # If no user was selected, we'll use the first agent found during processing
+        print_colored("No user selected. The report will automatically select a user for capability testing.", "yellow")
+        test_user_id = None
+    
+    print_colored(f"\nGenerating inactive users report (threshold: {threshold_days} days)...", "blue")
+    print_colored("This may take some time depending on the number of users in your system.", "yellow")
+    print_colored("Processing...", "blue")
+    
+    # Setup a progress indicator
+    def progress_callback(message):
+        print_colored(f"  {message}", "cyan")
+    
+    try:
+        # Generate the report with progress updates
+        inactive_users, summary = reports_manager.get_inactive_users_report(
+            threshold_days=threshold_days,
+            include_agents=include_agents,
+            include_requesters=include_requesters,
+            progress_callback=progress_callback,
+            test_user_id=test_user_id
+        )
+        
+        # Filter by status if requested
+        if status_filter is not None:
+            inactive_users = [user for user in inactive_users if user.get('active', False) == status_filter]
+            print_colored(f"Filtered to {len(inactive_users)} accounts matching status criteria.", "green")
+        
+        if not inactive_users:
+            print_colored("\n✅ No inactive users found for the given criteria!", "green")
+            input("Press Enter to continue...")
+            return
+        
+        # Display summary
+        print_colored("\nInactive Users Summary:", "green")
+        print_colored(f"Total Inactive Users: {len(inactive_users)}", "yellow")
+        if include_agents:
+            print_colored(f"Inactive Agents: {summary.get('inactive_agents')} of {summary.get('total_agents_checked')} checked", "yellow")
+        if include_requesters:
+            print_colored(f"Inactive Requesters: {summary.get('inactive_requesters')} of {summary.get('total_requesters_checked')} checked", "yellow")
+        print_colored(f"Users Without Login Data: {summary.get('users_without_login_data')}", "yellow")
+        print_colored(f"Inactivity Threshold: {threshold_days} days", "yellow")
+        print_colored(f"Execution Time: {summary.get('execution_time_seconds', 0):.2f} seconds", "yellow")
+        
+        # Display information about alternative tracking methods if used
+        if summary.get('using_alternative_methods'):
+            print_colored("\nNote About Data Collection:", "cyan", bold=True)
+            print_colored("Direct login tracking was not available. Alternative activity tracking methods were used.", "yellow")
+            print_colored("This may result in less accurate last activity dates, often using:", "yellow")
+            print_colored("  - Most recent ticket update time", "yellow")
+            print_colored("  - Account profile update time", "yellow")
+            print_colored("  - Account creation date", "yellow")
+            print_colored("as a proxy for user activity.", "yellow")
+        
+        # Display a sample of the inactive users
+        print_colored("\nSample of Inactive Users:", "green")
+        sample_size = min(10, len(inactive_users))  # Show at most 10 users
+        
+        # Column headers
+        headers = ["Name", "Email", "Type", "Days Inactive", "Status"]
+        
+        # Calculate column widths based on data
+        col_widths = [
+            max(len(headers[0]), max(len(f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()) for u in inactive_users[:sample_size])),
+            max(len(headers[1]), max(len(str(u.get('email', ''))) for u in inactive_users[:sample_size])),
+            max(len(headers[2]), max(len(str(u.get('type', ''))) for u in inactive_users[:sample_size])),
+            max(len(headers[3]), max(len(str(u.get('days_inactive', ''))) for u in inactive_users[:sample_size])),
+            max(len(headers[4]), 8)  # 'Active' or 'Inactive'
+        ]
+        
+        # Print headers
+        header_row = "  ".join(h.ljust(w) for h, w in zip(headers, col_widths))
+        print_colored(header_row, "cyan")
+        print_colored("-" * len(header_row), "cyan")
+        
+        # Print sample data
+        for user in inactive_users[:sample_size]:
+            name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+            email = str(user.get('email', ''))
+            user_type = str(user.get('type', ''))
+            days = str(user.get('days_inactive', ''))
+            status = 'Active' if user.get('active', False) else 'Inactive'
+            
+            row = [
+                name.ljust(col_widths[0]),
+                email.ljust(col_widths[1]),
+                user_type.ljust(col_widths[2]),
+                days.ljust(col_widths[3]),
+                status.ljust(col_widths[4])
+            ]
+            
+            print("  ".join(row))
+        
+        if len(inactive_users) > sample_size:
+            print_colored(f"\n... and {len(inactive_users) - sample_size} more inactive users", "yellow")
+        
+        # Offer more options
+        print_colored("\nWhat would you like to do with this report?", "green")
+        print_colored("1. Export to CSV", "cyan")
+        print_colored("2. View all inactive users in a paginated view", "cyan")
+        print_colored("3. Return to main menu", "cyan")
+        
+        option = input("Choose an option (1-3): ").strip()
+        
+        if option == "1":
+            # Generate a default filename
+            default_filename = f"inactive_users_report_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
+            filename = input(f"Enter filename (default: {default_filename}): ").strip()
+            
+            if not filename:
+                filename = default_filename
+                
+            success = reports_manager.export_inactive_users_to_csv(inactive_users, summary, filename)
+            
+            if success:
+                print_colored(f"✅ Report exported to {filename}", "green")
+                
+                # Offer to open the file
+                open_file = input("Open the CSV file? (y/n): ").lower() == 'y'
+                if open_file:
+                    if sys.platform == 'win32':
+                        os.system(f'start excel "{filename}"')
+                    elif sys.platform == 'darwin':
+                        os.system(f'open "{filename}"')
+                    else:
+                        os.system(f'xdg-open "{filename}"')
+            else:
+                print_colored(f"❌ Failed to export report", "red")
+        elif option == "2":
+            # Paginated view of all inactive users
+            page_size = 20
+            current_page = 0
+            total_pages = (len(inactive_users) + page_size - 1) // page_size
+            
+            while True:
+                clear_screen()
+                print_colored(f"Inactive Users (Page {current_page + 1}/{total_pages})", "blue")
+                
+                # Display column headers
+                header_row = "  ".join(h.ljust(w) for h, w in zip(headers, col_widths))
+                print_colored(header_row, "cyan")
+                print_colored("-" * len(header_row), "cyan")
+                
+                # Calculate page bounds
+                start_idx = current_page * page_size
+                end_idx = min(start_idx + page_size, len(inactive_users))
+                
+                # Display users for current page
+                for user in inactive_users[start_idx:end_idx]:
+                    name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+                    email = str(user.get('email', ''))
+                    user_type = str(user.get('type', ''))
+                    days = str(user.get('days_inactive', ''))
+                    status = 'Active' if user.get('active', False) else 'Inactive'
+                    
+                    row = [
+                        name.ljust(col_widths[0]),
+                        email.ljust(col_widths[1]),
+                        user_type.ljust(col_widths[2]),
+                        days.ljust(col_widths[3]),
+                        status.ljust(col_widths[4])
+                    ]
+                    
+                    print("  ".join(row))
+                
+                # Navigation options
+                print_colored("\nNavigation:", "green")
+                if current_page > 0:
+                    print_colored("P - Previous page", "cyan")
+                if current_page < total_pages - 1:
+                    print_colored("N - Next page", "cyan")
+                print_colored("X - Exit to main menu", "cyan")
+                
+                nav = input("Enter option: ").lower()
+                if nav == 'p' and current_page > 0:
+                    current_page -= 1
+                elif nav == 'n' and current_page < total_pages - 1:
+                    current_page += 1
+                elif nav == 'x':
+                    break
+        
+    except Exception as e:
+        print_colored(f"❌ Error generating report: {str(e)}", "red")
+    
     input("Press Enter to continue...")
 
 
@@ -1599,6 +2308,322 @@ def create_csv_template(csv_processor):
         print_colored(f"❌ Failed to create template.", "red")
     
     input("Press Enter to continue...")
+
+
+def select_agent_for_testing(user_manager, department_manager):
+    """
+    Prompt the user to search for and select an agent for API testing.
+    
+    Returns:
+        Selected agent ID or None if cancelled
+    """
+    print_colored("\nSelect an Agent for API Testing", "blue")
+    print_colored("This agent's ID will be used to test API functionality.", "yellow")
+    
+    # Options for searching
+    print_colored("\nSearch method:", "green")
+    print_colored("1. Search by Email", "cyan")
+    print_colored("2. Search by Name", "cyan")
+    print_colored("3. List All Agents", "cyan")
+    print_colored("4. Cancel", "cyan")
+    
+    choice = input("\nSelect search method: ").strip()
+    
+    if choice == "1":
+        # Search by email
+        email = input("Enter agent's email: ").strip()
+        if not email:
+            print_colored("Operation cancelled.", "yellow")
+            return None
+        
+        user = user_manager.get_user_by_email(email)
+        if not user:
+            print_colored(f"❌ No user found with email: {email}", "red")
+            return None
+            
+        # Verify the user is an agent
+        if not user.get('is_agent', False):
+            print_colored(f"❌ The selected user ({user.get('first_name')} {user.get('last_name')}) is not an agent.", "red")
+            confirmation = input("Do you want to use this non-agent user anyway? (y/n): ").lower()
+            if confirmation != 'y':
+                return None
+        
+        return user.get('id')
+        
+    elif choice == "2":
+        # Search by name
+        first_name = input("Enter agent's first name (leave blank to skip): ").strip()
+        last_name = input("Enter agent's last name (leave blank to skip): ").strip()
+        
+        if not first_name and not last_name:
+            print_colored("Operation cancelled.", "yellow")
+            return None
+            
+        users = user_manager.search_users_by_name(first_name, last_name)
+        
+        if not users:
+            print_colored(f"❌ No users found with name: {first_name} {last_name}", "red")
+            return None
+        
+        # Filter to show only agents first
+        agents = [u for u in users if u.get('is_agent', False)]
+        non_agents = [u for u in users if not u.get('is_agent', False)]
+        
+        # If we found agents, just show those; otherwise show all users
+        display_list = agents if agents else users
+        
+        if agents and non_agents:
+            print_colored(f"Found {len(agents)} agents and {len(non_agents)} non-agents matching your search.", "yellow")
+            show_all = input("Show all users instead of just agents? (y/n): ").lower() == 'y'
+            if show_all:
+                display_list = users
+        
+        selected_user = select_user_from_results(display_list, user_manager, department_manager)
+        if not selected_user:
+            return None
+            
+        # Warn if selected a non-agent
+        if not selected_user.get('is_agent', False):
+            print_colored(f"⚠️ Warning: The selected user ({selected_user.get('first_name')} {selected_user.get('last_name')}) is not an agent.", "yellow")
+            confirmation = input("Do you want to use this non-agent user for testing? (y/n): ").lower()
+            if confirmation != 'y':
+                return None
+        
+        return selected_user.get('id')
+        
+    elif choice == "3":
+        # List all agents
+        try:
+            # This assumes there's a method to get all agents in user_manager
+            # If not available, we could implement it or use a more generic approach
+            print_colored("Retrieving all agents...", "blue")
+            all_agents = user_manager.get_all_agents()
+            
+            if not all_agents:
+                print_colored("❌ No agents found in the system.", "red")
+                return None
+                
+            # Sort by name for easier finding
+            all_agents.sort(key=lambda a: f"{a.get('first_name', '')} {a.get('last_name', '')}")
+            
+            # Display in a paginated view
+            page_size = 10
+            current_page = 0
+            total_pages = (len(all_agents) + page_size - 1) // page_size
+            
+            while True:
+                clear_screen()
+                print_colored(f"All Agents (Page {current_page + 1}/{total_pages})", "blue")
+                print_colored("Select an agent to use for API testing:", "yellow")
+                print_colored("-" * 50, "cyan")
+                
+                # Calculate page bounds
+                start_idx = current_page * page_size
+                end_idx = min(start_idx + page_size, len(all_agents))
+                
+                # Display agents for current page
+                for i, agent in enumerate(all_agents[start_idx:end_idx], start_idx + 1):
+                    name = f"{agent.get('first_name', '')} {agent.get('last_name', '')}".strip()
+                    email = agent.get('email', 'No email')
+                    print_colored(f"{i}. {name} ({email})", "cyan")
+                
+                # Navigation options
+                print_colored("\nNavigation:", "green")
+                if current_page > 0:
+                    print_colored("P - Previous page", "cyan")
+                if current_page < total_pages - 1:
+                    print_colored("N - Next page", "cyan")
+                print_colored("X - Cancel selection", "cyan")
+                
+                selection = input("\nEnter agent number or navigation option: ").lower()
+                
+                if selection == 'x':
+                    print_colored("Operation cancelled.", "yellow")
+                    return None
+                elif selection == 'p' and current_page > 0:
+                    current_page -= 1
+                    continue
+                elif selection == 'n' and current_page < total_pages - 1:
+                    current_page += 1
+                    continue
+                
+                try:
+                    idx = int(selection) - 1
+                    if 0 <= idx < len(all_agents):
+                        selected_agent = all_agents[idx]
+                        agent_name = f"{selected_agent.get('first_name', '')} {selected_agent.get('last_name', '')}".strip()
+                        print_colored(f"Selected agent: {agent_name}", "green")
+                        return selected_agent.get('id')
+                    else:
+                        print_colored("❌ Invalid selection.", "red")
+                        input("Press Enter to continue...")
+                except ValueError:
+                    if selection not in ['p', 'n', 'x']:
+                        print_colored("❌ Please enter a valid number or navigation option.", "red")
+                        input("Press Enter to continue...")
+            
+        except Exception as e:
+            print_colored(f"❌ Error retrieving agents: {str(e)}", "red")
+            return None
+    
+    elif choice == "4" or choice.lower() == "cancel":
+        print_colored("Operation cancelled.", "yellow")
+        return None
+    
+    else:
+        print_colored("❌ Invalid selection.", "red")
+        return None
+    
+    return None
+
+def run_api_diagnostics(user_manager):
+    """Run API diagnostics to identify issues."""
+    print_colored("\n🔍 API Diagnostics", "blue")
+    print_colored("This function tests API connectivity and permissions.", "yellow")
+    
+    # Initialize reports manager with the API client and workspace ID
+    reports_manager = ReportsManager(
+        user_manager.api_client, 
+        user_manager.workspace_id,
+        user_manager.logger
+    )
+    
+    # Initialize department manager for user selection
+    department_manager = DepartmentManager(
+        user_manager.api_client,
+        user_manager.workspace_id,
+        user_manager.logger
+    )
+    
+    # Prompt for selecting a test agent
+    print_colored("\nTo test API functionality, we need to select a user account.", "yellow")
+    print_colored("This helps verify specific endpoints and permissions in your Freshservice instance.", "yellow")
+    
+    current_user_id = select_agent_for_testing(user_manager, department_manager)
+    
+    if current_user_id:
+        # If user was selected, get their details for display
+        try:
+            test_user = user_manager.get_user_by_id(current_user_id)
+            user_name = f"{test_user.get('first_name', '')} {test_user.get('last_name', '')}".strip()
+            print_colored(f"Using {user_name} (ID: {current_user_id}) for testing", "green")
+        except Exception:
+            print_colored(f"Using ID {current_user_id} for testing", "green")
+    else:
+        # If no user was selected, use anonymous testing
+        print_colored("No user selected. Using anonymous testing (some tests may fail).", "yellow")
+    
+    print_colored("\nRunning API diagnostics...", "blue")
+    diagnostics = reports_manager.run_api_diagnostics(current_user_id)
+    
+    # Display summary
+    status = diagnostics.get('status', 'unknown')
+    if status == 'healthy':
+        status_color = "green"
+    elif status == 'partial':
+        status_color = "yellow"
+    else:
+        status_color = "red"
+        
+    print_colored(f"\nAPI Status: {status.upper()}", status_color, bold=True)
+    print_colored(diagnostics.get('summary', 'No summary available.'), status_color)
+    
+    # Display details for each endpoint
+    print_colored("\nEndpoint Details:", "blue")
+    
+    # Group endpoints for easier understanding
+    endpoint_groups = {
+        "Core Endpoints": ["tickets", "agents"],
+        "Filtering Methods": ["tickets_standard_filter", "tickets_requester"],
+        "Detailed Data": ["ticket_conversations"]
+    }
+    
+    for group_name, endpoints in endpoint_groups.items():
+        print_colored(f"\n{group_name}:", "cyan", bold=True)
+        
+        for endpoint in endpoints:
+            if endpoint in diagnostics.get('endpoints', {}):
+                result = diagnostics['endpoints'][endpoint]
+                success = result.get('success', False)
+                status_code = result.get('status_code')
+                error = result.get('error')
+                params = result.get('params', {})
+                
+                if success:
+                    print_colored(f"✅ {endpoint}: OK", "green")
+                else:
+                    print_colored(f"❌ {endpoint}: Failed", "red")
+                    if status_code:
+                        print_colored(f"   Status Code: {status_code}", "yellow")
+                    if error:
+                        print_colored(f"   Error: {error}", "yellow")
+                    
+                    # Provide specific recommendations based on endpoint and error
+                    if endpoint == "tickets_standard_filter" and status_code == 400:
+                        print_colored("   Recommendation: Your account may not support filtering by responder_id directly.", "yellow")
+                        print_colored("   Try using the tickets endpoint without filters to verify basic access.", "yellow")
+                    elif endpoint == "tickets_requester" and status_code == 400:
+                        print_colored("   Recommendation: The filter parameter format may not be supported.", "yellow")
+                        print_colored("   Check FreshService API documentation for correct query parameter format.", "yellow")
+                    elif status_code == 401 or status_code == 403:
+                        print_colored("   Recommendation: Check your API key permissions for this endpoint.", "yellow")
+            else:
+                print_colored(f"❓ {endpoint}: Not tested", "yellow")
+    
+    # Offer to export diagnostics
+    export = input("\nExport diagnostic results to file? (y/n): ").lower() == 'y'
+    
+    if export:
+        import json
+        from datetime import datetime
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"freshservice_api_diagnostics_{timestamp}.json"
+        
+        try:
+            with open(filename, 'w') as f:
+                json.dump(diagnostics, f, indent=2)
+            print_colored(f"✅ Diagnostics exported to {filename}", "green")
+        except Exception as e:
+            print_colored(f"❌ Failed to export diagnostics: {str(e)}", "red")
+    
+    print_colored("\nTroubleshooting Tips:", "blue")
+    print_colored("1. Check API key permissions and make sure it has access to tickets and agents", "yellow")
+    print_colored("2. Verify network connectivity to the Freshservice API", "yellow")
+    print_colored("3. Ensure your Freshservice plan includes the features you're trying to access", "yellow")
+    print_colored("4. Check for any rate limiting or quota issues", "yellow")
+    print_colored("5. Contact Freshservice support if issues persist", "yellow")
+    
+    print_colored("\nFreshservice API Notes:", "blue")
+    print_colored("• The 'responder_id' parameter is not directly supported for filtering tickets", "yellow")
+    print_colored("• Valid filter values include: 'watching', 'new_and_my_open', 'spam', 'deleted', 'archived'", "yellow")
+    print_colored("• For agent activity, the API requires client-side filtering of ticket data", "yellow")
+    print_colored("• To work around API limitations, this tool uses several fallback approaches", "yellow")
+    
+    # Look for common error patterns and suggest solutions
+    try:
+        error_patterns = []
+        for endpoint_result in diagnostics.get('endpoints', {}).values():
+            if endpoint_result and isinstance(endpoint_result, dict):
+                error_text = endpoint_result.get('error', '')
+                if error_text and "400 Bad Request" in error_text:
+                    error_patterns.append(error_text)
+        
+        if error_patterns:
+            print_colored("\nCommon 400 Bad Request Solutions:", "blue")
+            print_colored("1. Check parameter formats - some endpoints may expect different parameter names", "yellow")
+            print_colored("2. Verify the endpoint URL is correct for your FreshService version", "yellow")
+            print_colored("3. Your API token might not have permission for some filtering operations", "yellow")
+            
+            # Display specific errors for the Freshservice API
+            if any("responder_id" in err for err in error_patterns):
+                print_colored("\nFreshservice API Specifics:", "blue")
+                print_colored("The responder_id parameter appears to be unavailable or restricted in your API version.", "yellow")
+                print_colored("Try using different filtering options or contact Freshservice support.", "yellow")
+    except Exception as e:
+        print_colored(f"\nError analyzing diagnostic results: {str(e)}", "red")
+    
+    input("\nPress Enter to continue...")
 
 
 def main() -> None:

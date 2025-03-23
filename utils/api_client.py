@@ -22,7 +22,7 @@ class FreshServiceAPI:
     Handles authentication, rate limiting, and error handling.
     """
     
-    BASE_URL = "https://fridababy.freshservice.com/api"
+    # Base URL will be dynamically set based on the domain extracted from the API key
     API_VERSION = "v2"
     # Rate limiting: 50 requests per minute (as per FreshService API documentation)
     RATE_LIMIT = 50
@@ -46,22 +46,42 @@ class FreshServiceAPI:
         self.api_key = api_key
         self.logger = logger
         self.dry_run = dry_run
-        self.auth_header = self._get_auth_header()
         self.domain = self._extract_domain_from_key()
+        self.BASE_URL = f"https://{self.domain}.freshservice.com/api"
+        self.logger.info(f"API Base URL: {self.BASE_URL}")
+        self.auth_header = self._get_auth_header()
         
         # Rate limiting tracking
         self.request_timestamps = []
     
     def _extract_domain_from_key(self) -> str:
-        """Extract the domain from the API key format."""
+        """
+        Extract the domain from the API key format or ask the user for it.
+        
+        Returns:
+            Domain name for the FreshService instance
+        """
         try:
-            # API keys often contain the domain information
-            # Format might be: domain:key or similar
+            # Prompt for domain if not already in the API key
+            # API keys in Freshservice might be in format: domain:key
             if ':' in self.api_key:
-                return self.api_key.split(':')[0]
+                domain = self.api_key.split(':')[0]
+                self.logger.info(f"Extracted domain from API key: {domain}")
+                return domain
+            else:
+                # If domain cannot be extracted from the key, use a default or prompt
+                # For now, we'll use a default domain "fridababy" based on previous config
+                # In a production environment, you might want to prompt the user
+                default_domain = "fridababy"
+                self.logger.warning(f"Could not extract domain from API key. Using default: {default_domain}")
+                return default_domain
+                
         except Exception as e:
-            self.logger.warning(f"Could not extract domain from API key: {str(e)}")
-        return None
+            self.logger.warning(f"Error extracting domain from API key: {str(e)}")
+            # Fallback to default domain
+            default_domain = "fridababy"
+            self.logger.warning(f"Using fallback domain: {default_domain}")
+            return default_domain
     
     def _get_auth_header(self) -> Dict[str, str]:
         """
@@ -114,7 +134,8 @@ class FreshServiceAPI:
         data: Optional[Dict] = None, 
         params: Optional[Dict] = None,
         workspace_id: Optional[int] = None,
-        expect_no_content: bool = False
+        expect_no_content: bool = False,
+        _diagnostic: bool = False
     ) -> Dict:
         """
         Make an HTTP request to the FreshService API.
@@ -126,6 +147,7 @@ class FreshServiceAPI:
             params: URL parameters
             workspace_id: Optional workspace ID
             expect_no_content: If True, handle 204 No Content responses as success
+            _diagnostic: If True, captures and returns more detailed error information
             
         Returns:
             Response data as dictionary
@@ -189,11 +211,11 @@ class FreshServiceAPI:
             if data:
                 json_data = data
             
-            # Make the request with verbose logging for debugging
-            self.logger.info(f"HTTP {method} {url}")
+            # Make the request with logging at DEBUG level (not INFO)
+            self.logger.debug(f"HTTP {method} {url}")
             if json_data:
-                self.logger.info(f"Request headers: {self.auth_header}")
-                self.logger.info(f"Request payload: {json.dumps(json_data)}")
+                self.logger.debug(f"Request headers: {self.auth_header}")
+                self.logger.debug(f"Request payload: {json.dumps(json_data)}")
             
             response = requests.request(
                 method=method,
@@ -203,8 +225,10 @@ class FreshServiceAPI:
                 json=json_data
             )
             
-            # Log response info for debugging
-            self.logger.info(f"Response status: {response.status_code}")
+            # Log response info for debugging only
+            self.logger.debug(f"Response status: {response.status_code}")
+            if response.status_code >= 400:  # Only log errors at INFO level
+                self.logger.info(f"Error response: {response.status_code} for {method} {url}")
             
             # Handle 204 No Content responses (used for delete operations)
             if expect_no_content and response.status_code == 204:
@@ -223,43 +247,103 @@ class FreshServiceAPI:
             if response.status_code >= 400:
                 # Try to get detailed error information
                 error_details = None
+                error_message = f"{response.status_code} {response.reason} for url: {url}"
+                
+                # Special handling for 404 errors
+                if response.status_code == 404:
+                    if "audit_logs" in endpoint:
+                        error_message = f"404 Not Found: The audit_logs endpoint may not be available in your Freshservice plan or requires different access rights. Using alternative methods for user activity tracking."
+                        self.logger.warning(error_message)
+                        # Return an empty response with helpful information for audit logs
+                        if _diagnostic:
+                            return {
+                                'success': False,
+                                'error': error_message,
+                                'status_code': 404,
+                                'response': {'audit_logs': []}
+                            }
+                        # For non-diagnostic calls, raise a more helpful exception
+                        raise Exception(error_message)
+                
                 try:
                     error_details = response.json()
                     # Log details at info level for better debugging
                     self.logger.info(f"Error details: {error_details}")
+                    
+                    # Add more specific error information for common cases
+                    if 'errors' in error_details and error_details['errors']:
+                        error_message += f" - Details: {error_details['errors']}"
                 except:
                     self.logger.info(f"Raw error response: {response.text}")
+                    if response.text:
+                        error_message += f" - Response: {response.text[:200]}"
                 
-                error_msg = f"{response.status_code} {response.reason} for url: {url}"
+                # Add parameter info to error for better debugging
+                if params:
+                    param_info = ', '.join([f"{k}={v}" for k, v in params.items()])
+                    self.logger.info(f"Request parameters: {param_info}")
+                    error_message += f" (params: {param_info})"
+                
                 # Log summary at error level for console
-                self.logger.error(f"API request failed: {error_msg}")
-                raise Exception(f"API request failed: {error_msg}")
+                self.logger.error(f"API request failed: {error_message}")
+                
+                # For diagnostic mode, return error details instead of raising exception
+                if _diagnostic:
+                    return {
+                        'success': False,
+                        'error': error_message,
+                        'status_code': response.status_code,
+                        'response': error_details
+                    }
+                    
+                raise Exception(error_message)
             
-            # Log success at debug level to reduce console output
-            self.logger.debug(f"Request to {url} succeeded with status {response.status_code}")
+            # Parse the response
+            response_json = {}
+            if response.text:
+                try:
+                    response_json = response.json()
+                except ValueError:
+                    # If response is not JSON, return the raw text
+                    return {"text": response.text}
             
-            # Return the JSON response
-            try:
-                return response.json()
-            except Exception as json_error:
-                self.logger.error(f"Failed to parse JSON response: {str(json_error)}")
-                self.logger.info(f"Raw response: {response.text}")
-                raise Exception(f"Failed to parse API response as JSON: {str(json_error)}")
+            return response_json
             
         except Exception as e:
-            # Log the error at debug level with details, error level for summary
-            self.logger.debug(f"Request to {url} failed: {str(e)}")
-            # Don't re-raise for common 404/403 errors to allow fallback mechanisms to work
-            if "404" in str(e) or "403" in str(e):
-                self.logger.debug(f"Non-critical error: {str(e)}")
-                raise e
-            else:
-                self.logger.error(f"API request error: {str(e).split('for url')[0]}")
-                raise e
-        finally:
-            # Track request duration for rate limiting
-            request_duration = time.time() - request_start
-            self.logger.debug(f"Request took {request_duration:.3f} seconds")
+            # Calculate time spent on this request
+            request_time = time.time() - request_start
+            
+            # Handle rate limit errors
+            if hasattr(e, 'response') and e.response and e.response.status_code == 429:
+                retry_after = int(e.response.headers.get('Retry-After', self.RATE_LIMIT_WINDOW))
+                error_message = f"Rate limit exceeded, retry after {retry_after} seconds."
+                self.logger.warning(error_message)
+                
+                # For diagnostic mode, return rate limit info instead of raising exception
+                if _diagnostic:
+                    return {
+                        'success': False,
+                        'error': error_message,
+                        'status_code': 429,
+                        'retry_after': retry_after
+                    }
+                    
+                raise Exception(error_message)
+            
+            # Log all other errors
+            error_message = f"API request error: {str(e)}"
+            self.logger.error(error_message)
+            
+            # For diagnostic mode, return error details instead of raising exception
+            if _diagnostic:
+                return {
+                    'success': False,
+                    'error': error_message,
+                    'exception_type': type(e).__name__
+                }
+                
+            # Re-raise the exception
+            raise
     
     def get(
         self, 

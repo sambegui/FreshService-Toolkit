@@ -17,8 +17,19 @@ if not exist venv (
     python -m venv venv
 )
 
-REM Activate the virtual environment and run the script
-echo Starting the toolkit...
+REM Activate the virtual environment and install dependencies
 call venv\Scripts\activate.bat
+
+REM Install required packages
+echo Installing required packages...
+pip install colorama tabulate keyring > NUL 2>&1
+if %errorlevel% neq 0 (
+    echo Warning: Some dependencies could not be installed automatically.
+    echo The toolkit will try to run with limited functionality.
+    timeout /t 3 > NUL
+)
+
+REM Run the script
+echo Starting the toolkit...
 python freshservice_toolkit.py %*
 pause 

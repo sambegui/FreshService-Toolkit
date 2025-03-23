@@ -885,4 +885,58 @@ class UserManager:
             True if valid, False otherwise
         """
         email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        return bool(re.match(email_pattern, email)) 
+        return bool(re.match(email_pattern, email))
+    
+    def get_all_agents(self) -> List[Dict[str, Any]]:
+        """
+        Get all agents from FreshService API.
+        
+        Returns:
+            List of all agents in the system
+        """
+        self.logger.info("Getting all agents")
+        
+        try:
+            agents = []
+            page = 1
+            per_page = 100  # Maximum allowed by API
+            
+            while True:
+                self.logger.debug(f"Fetching agents page {page}")
+                
+                try:
+                    # Get page of agents
+                    response = self.api_client.get(
+                        "agents",
+                        params={"per_page": per_page, "page": page},
+                        workspace_id=self.workspace_id
+                    )
+                    
+                    if not isinstance(response, dict) or 'agents' not in response:
+                        self.logger.warning(f"Unexpected response format from agents endpoint: {response}")
+                        break
+                        
+                    batch = response.get('agents', [])
+                    
+                    if not batch:
+                        # No more agents to retrieve
+                        break
+                        
+                    agents.extend(batch)
+                    
+                    # Check if there are more pages
+                    if len(batch) < per_page:
+                        # If we got fewer items than requested, this must be the last page
+                        break
+                        
+                    page += 1
+                except Exception as e:
+                    self.logger.error(f"Error retrieving agents page {page}: {str(e)}")
+                    break
+            
+            self.logger.info(f"Retrieved {len(agents)} agents")
+            return agents
+            
+        except Exception as e:
+            self.logger.error(f"Error retrieving all agents: {str(e)}")
+            return [] 

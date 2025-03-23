@@ -65,20 +65,9 @@ If you encounter dependency issues on macOS after running the setup script, the 
 # Activate the virtual environment
 source venv/bin/activate
 
-# Install the macOS-compatible version
-pip install python-Levenshtein-wheels
-
-# If that fails, try the standard version
-pip install python-Levenshtein
-
-# If that also fails, try the basic Levenshtein package
-pip install Levenshtein
-
-# Other common dependencies that might need manual installation
+# Manually install dependencies
 pip install requests
-pip install colorama
-pip install tabulate
-pip install keyring
+pip install python-Levenshtein-wheels
 
 # Now try running the toolkit again
 ./run_toolkit.sh
@@ -127,8 +116,6 @@ python freshservice_toolkit.py
 - **👥 Group Management**: Manage user group memberships
 - **🔐 Access Control**: Handle password resets and account unlocking
 - **📈 Reports**: Generate reports on user activity and export data
-  - User Activity Report: Track ticket interactions for agents and requesters
-  - Inactive Accounts Report: Identify users who haven't logged in recently
 - **🔄 Switch Workspace**: Change to a different FreshService workspace
 - **❓ Help**: Display help information
 - **🚪 Exit**: Exit the toolkit (use 'q' at any time to quit)

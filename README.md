@@ -18,6 +18,10 @@ A comprehensive toolkit for FreshService administrators to efficiently manage us
 - 📊 Bulk operations via CSV files
 - 👥 Group management for user permissions
 - 🔄 Support for multiple FreshService workspaces
+- 📋 Advanced reporting capabilities
+  - User activity tracking for both Agents and Requesters
+  - Inactive accounts reporting based on login history
+- 🔑 Secure API key management with validation
 
 ## Installation
 
@@ -50,12 +54,12 @@ A comprehensive toolkit for FreshService administrators to efficiently manage us
    ./run_toolkit.sh
    ```
 
-The script requires Python 3.6 or higher and uses several dependencies that are automatically managed.
+The script requires Python 3.6 or higher and uses several dependencies that are automatically managed. The setup scripts will install all required dependencies in a virtual environment.
 
 ## Troubleshooting
 
 ### macOS Installation Issues
-If you encounter dependency issues on macOS after running the setup script, you may need to manually install some packages:
+If you encounter dependency issues on macOS after running the setup script, the most common issues involve the Levenshtein package:
 
 ```bash
 # Activate the virtual environment
@@ -63,11 +67,30 @@ source venv/bin/activate
 
 # Manually install dependencies
 pip install requests
-pip install Levenshtein
+pip install python-Levenshtein-wheels
 
 # Now try running the toolkit again
 ./run_toolkit.sh
 ```
+
+If you see import errors for any module, you can install it directly:
+```bash
+pip install [module_name]
+```
+
+### Dependencies
+
+If you encounter errors related to missing modules, you can install all required dependencies using:
+
+```bash
+pip install -r requirements.txt
+```
+
+Key dependencies include:
+- requests: For API communication
+- colorama: For colored console output
+- tabulate: For formatted table output
+- keyring: For secure API key storage
 
 ## Requirements
 
@@ -92,7 +115,7 @@ python freshservice_toolkit.py
 - **📊 Bulk Operations**: Perform actions on multiple users via CSV
 - **👥 Group Management**: Manage user group memberships
 - **🔐 Access Control**: Handle password resets and account unlocking
-- **📈 Reports**: Generate reports on user activity and export data (WIP)
+- **📈 Reports**: Generate reports on user activity and export data
 - **🔄 Switch Workspace**: Change to a different FreshService workspace
 - **❓ Help**: Display help information
 - **🚪 Exit**: Exit the toolkit (use 'q' at any time to quit)
@@ -152,21 +175,40 @@ Email,Reason
 john.doe@example.com,Left the company
 ```
 
+## Reports
+
+### User Activity Report
+Generates detailed reports on user activity, tracking:
+- Requester ticket interactions
+- Agent ticket activities
+- Last login timestamps
+- Communication patterns
+
+### Inactive Accounts Report
+Identifies users who haven't logged in for a specified period:
+- Configurable inactivity threshold (days)
+- Covers both agents and requesters
+- Exports results to CSV for review
+
 ## Security
 
-- 🔑 Your API key is never stored on disk and is only kept in memory during the script's execution
+- 🔑 API key validation ensures your credentials are valid before proceeding
+- 🔒 Your API key is securely stored using the system's credential manager (Windows Credential Locker, macOS Keychain, or Linux Secret Service)
 - 🛡️ All API communication happens over HTTPS
 - 🚫 The script performs input validation before making API calls
 
 ## Logging
 
-Logs are stored in the `logs` directory. Check these logs for detailed information about operation results and any errors encountered.
+- Logs are stored in the `logs` directory with detailed information
+- Console output is limited to errors only for a cleaner experience
+- Comprehensive debug information is automatically saved to log files
 
 ## Quick Tips
 
 - Press 'q' at any menu to quit the application
 - Use the filter option in search results to narrow down large result sets
 - Check the logs folder for detailed information about operations and errors
+- Your API key is securely stored between sessions - no need to enter it each time
 
 ## License
 
